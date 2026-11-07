@@ -14,7 +14,7 @@ export const MAP_STYLES: MapStyle[] = [
   { id: 'fiord', label: 'Fiord', url: 'https://tiles.openfreemap.org/styles/fiord', dark: true },
 ]
 
-const KEY = 'itinerary-map:style'
+const KEY = 'geojson-trip-planner:style'
 
 export function initialStyle(): MapStyle {
   try {
@@ -35,7 +35,7 @@ export function saveStyle(id: string) {
 }
 
 export type Theme = 'light' | 'dark'
-const THEME_KEY = 'itinerary-map:theme'
+const THEME_KEY = 'geojson-trip-planner:theme'
 
 /** UI theme. Light unless the viewer has explicitly switched to dark. */
 export function initialTheme(): Theme {

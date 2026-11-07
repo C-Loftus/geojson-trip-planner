@@ -8,18 +8,27 @@ import {
   Popup,
   ScaleControl,
   setWorkerUrl,
+  type ExpressionSpecification,
   type GeoJSONSource,
 } from 'maplibre-gl'
 import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { mapData, type Stop } from './geojson'
+import { EMOJI_IMAGE_PREFIX, emojiImage } from './icons'
 import type { MapStyle } from './styles'
 
 setWorkerUrl(workerUrl)
 
 const ACCENT = '#2f6fde'
-const L = { route: 'itin-route', circle: 'itin-circle', num: 'itin-num', label: 'itin-label' } as const
-const HIT_LAYERS = [L.circle, L.num, L.label]
+const L = {
+  route: 'itin-route',
+  circle: 'itin-circle',
+  num: 'itin-num',
+  icon: 'itin-icon',
+  label: 'itin-label',
+} as const
+const HIT_LAYERS = [L.circle, L.num, L.icon, L.label]
+const HAS_ICON: ExpressionSpecification = ['has', 'icon']
 
 export interface MapViewHandle {
   fit: () => void
@@ -101,8 +110,14 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(props, 
     if (!map.getLayer(L.circle)) return
     map.setLayoutProperty(L.route, 'visibility', path ? 'visible' : 'none')
     map.setLayoutProperty(L.num, 'visibility', nums ? 'visible' : 'none')
-    map.setPaintProperty(L.circle, 'circle-radius', nums ? 12 : 7)
-    map.setLayoutProperty(L.label, 'text-offset', [0, nums ? 1.3 : 0.9])
+    // Stops with an icon always keep the full-size badge; plain stops shrink to dots.
+    map.setPaintProperty(L.circle, 'circle-radius', ['case', HAS_ICON, 13, nums ? 12 : 7])
+    map.setLayoutProperty(L.label, 'text-offset', [
+      'case',
+      HAS_ICON,
+      ['literal', [0, 1.35]],
+      ['literal', [0, nums ? 1.3 : 0.9]],
+    ])
   }
 
   function addLayers(map: MlMap) {
@@ -123,8 +138,8 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(props, 
       source: 'itin-points',
       paint: {
         'circle-radius': 12,
-        'circle-color': ACCENT,
-        'circle-stroke-color': '#ffffff',
+        'circle-color': ['case', HAS_ICON, '#ffffff', ACCENT],
+        'circle-stroke-color': ['case', HAS_ICON, ACCENT, '#ffffff'],
         'circle-stroke-width': 2,
       },
     })
@@ -132,6 +147,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(props, 
       id: L.num,
       type: 'symbol',
       source: 'itin-points',
+      filter: ['!', HAS_ICON],
       layout: {
         'text-field': ['get', 'num'],
         'text-font': ['Noto Sans Bold'],
@@ -140,6 +156,17 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(props, 
         'text-ignore-placement': true,
       },
       paint: { 'text-color': '#ffffff' },
+    })
+    map.addLayer({
+      id: L.icon,
+      type: 'symbol',
+      source: 'itin-points',
+      filter: HAS_ICON,
+      layout: {
+        'icon-image': ['concat', EMOJI_IMAGE_PREFIX, ['get', 'icon']],
+        'icon-allow-overlap': true,
+        'icon-ignore-placement': true,
+      },
     })
     map.addLayer({
       id: L.label,
@@ -180,6 +207,12 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(props, 
     map.addControl(new AttributionControl({ compact: true }), 'bottom-right')
 
     map.on('style.load', () => addLayers(map))
+    // Emoji icons are generated on demand (and again after a basemap switch).
+    map.on('styleimagemissing', (e) => {
+      if (!e.id.startsWith(EMOJI_IMAGE_PREFIX) || map.hasImage(e.id)) return
+      const { data, pixelRatio } = emojiImage(e.id.slice(EMOJI_IMAGE_PREFIX.length))
+      map.addImage(e.id, data, { pixelRatio })
+    })
     map.once('load', fit)
 
     const canvas = map.getCanvasContainer()
@@ -188,13 +221,55 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(props, 
       map.on('mouseleave', id, () => (canvas.style.cursor = ''))
     }
 
-    // Click: popup on a stop, otherwise add a stop.
+    // Left click: open a stop's popup. Empty map does nothing — adding is deliberate (below).
     map.on('click', (e) => {
       const layers = HIT_LAYERS.filter((id) => map.getLayer(id))
       const hit = map.queryRenderedFeatures(e.point, { layers })[0]
       if (hit) showPopup(Number(hit.properties.idx))
-      else latest.current.onAdd(e.lngLat.lng, e.lngLat.lat)
+      else popupRef.current?.remove()
     })
+
+    // Right click (or long-press on touch) opens a menu with "Add stop here".
+    const openAddMenu = (lng: number, lat: number) => {
+      const el = document.createElement('div')
+      el.className = 'ctx-menu'
+      const btn = document.createElement('button')
+      btn.className = 'primary'
+      btn.textContent = '+ Add stop here'
+      const coords = document.createElement('div')
+      coords.className = 'ctx-coords'
+      coords.textContent = `${lat.toFixed(5)}, ${lng.toFixed(5)}`
+      el.append(btn, coords)
+      popupRef.current?.remove()
+      const popup = new Popup({ closeButton: false, offset: 4, className: 'ctx-popup', maxWidth: '220px' })
+        .setLngLat([lng, lat])
+        .setDOMContent(el)
+        .addTo(map)
+      popupRef.current = popup
+      btn.onclick = () => {
+        popup.remove()
+        latest.current.onAdd(lng, lat)
+      }
+      btn.focus()
+    }
+    map.on('contextmenu', (e) => {
+      e.preventDefault()
+      openAddMenu(e.lngLat.lng, e.lngLat.lat)
+    })
+
+    // Long-press for touch devices (most mobile browsers don't fire contextmenu on the map).
+    let pressTimer: ReturnType<typeof setTimeout> | undefined
+    const cancelPress = () => clearTimeout(pressTimer)
+    map.on('touchstart', (e) => {
+      cancelPress()
+      if (e.points.length !== 1) return
+      const { lng, lat } = e.lngLat
+      pressTimer = setTimeout(() => openAddMenu(lng, lat), 550)
+    })
+    map.on('touchend', cancelPress)
+    map.on('touchcancel', cancelPress)
+    map.on('touchmove', cancelPress)
+    map.on('movestart', cancelPress)
 
     return () => {
       map.remove()

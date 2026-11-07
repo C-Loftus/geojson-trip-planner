@@ -1,9 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import './App.css'
 import { decodeHash, EMPTY, encodeHash, fromGeoJSON, newId, toGeoJSON, type Itinerary, type Stop } from './geojson'
+import { agentPrompt } from './agentPrompt'
+import { BasemapPicker } from './BasemapPicker'
+import { firstEmoji, ICONS } from './icons'
 import { MapView, type MapViewHandle } from './MapView'
 import { PlaceSearch, type Place } from './PlaceSearch'
-import { applyTheme, initialStyle, initialTheme, MAP_STYLES, saveStyle, type Theme } from './styles'
+import { applyTheme, initialStyle, initialTheme, saveStyle, type Theme } from './styles'
+
+const PANEL_KEY = 'geojson-trip-planner:panel'
+function initialPanelOpen() {
+  try {
+    return localStorage.getItem(PANEL_KEY) !== 'closed'
+  } catch {
+    return true
+  }
+}
 
 function readHash(): Itinerary {
   const h = location.hash.slice(1)
@@ -21,7 +33,10 @@ export default function App() {
   const [itin, setItin] = useState<Itinerary>(readHash)
   const [mapStyle, setMapStyle] = useState(initialStyle)
   const [theme, setTheme] = useState<Theme>(initialTheme)
-  const [copied, setCopied] = useState(false)
+  const [copied, setCopied] = useState<'link' | 'prompt' | null>(null)
+  const [panelOpen, setPanelOpen] = useState(initialPanelOpen)
+  /** Index of the stop whose icon picker is open. */
+  const [picker, setPicker] = useState<number | null>(null)
   const mapView = useRef<MapViewHandle>(null)
   const fileInput = useRef<HTMLInputElement>(null)
   const lastWritten = useRef(location.hash.slice(1))
@@ -29,6 +44,13 @@ export default function App() {
   const { title, stops, showNumbers, showPath } = itin
 
   useEffect(() => applyTheme(theme), [theme])
+  useEffect(() => {
+    try {
+      localStorage.setItem(PANEL_KEY, panelOpen ? 'open' : 'closed')
+    } catch {
+      /* storage unavailable */
+    }
+  }, [panelOpen])
   const setStops = (fn: (s: Stop[]) => Stop[]) => setItin((it) => ({ ...it, stops: fn(it.stops) }))
   const updateStop = (i: number, patch: Partial<Stop>) =>
     setStops((s) => s.map((p, j) => (j === i ? { ...p, ...patch } : p)))
@@ -39,7 +61,7 @@ export default function App() {
       const h = title || stops.length ? encodeHash(itin) : ''
       lastWritten.current = h
       history.replaceState(null, '', h ? `#${h}` : location.pathname + location.search)
-      document.title = title ? `${title} · Itinerary Map` : 'Itinerary Map'
+      document.title = title ? `${title} · GeoJSON Trip Planner` : 'GeoJSON Trip Planner'
     }, 250)
     return () => clearTimeout(t)
   }, [itin, title, stops.length])
@@ -56,7 +78,7 @@ export default function App() {
   }, [])
 
   const addStop = useCallback((lng: number, lat: number, name = '') => {
-    setStops((s) => [...s, { id: newId(), lng, lat, name, description: '' }])
+    setStops((s) => [...s, { id: newId(), lng, lat, name, description: '', icon: '' }])
   }, [])
 
   const reorder = (i: number, d: number) =>
@@ -68,17 +90,18 @@ export default function App() {
       return next
     })
 
-  async function copyLink() {
-    const h = encodeHash(itin)
-    const url = `${location.origin}${location.pathname}#${h}`
+  async function copy(text: string, what: 'link' | 'prompt') {
     try {
-      await navigator.clipboard.writeText(url)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1200)
+      await navigator.clipboard.writeText(text)
+      setCopied(what)
+      setTimeout(() => setCopied(null), 1200)
     } catch {
-      prompt('Copy this link:', url)
+      prompt('Copy this:', text)
     }
   }
+  const appUrl = () => `${location.origin}${location.pathname}`
+  const copyLink = () => copy(`${appUrl()}#${encodeHash(itin)}`, 'link')
+  const copyPrompt = () => copy(agentPrompt(appUrl()), 'prompt')
 
   function download() {
     const blob = new Blob([JSON.stringify(toGeoJSON(itin), null, 2)], { type: 'application/geo+json' })
@@ -106,34 +129,27 @@ export default function App() {
   }
 
   return (
-    <div className="app">
-      <aside>
+    <div className={`app${panelOpen ? '' : ' panel-closed'}`}>
+      <aside aria-hidden={!panelOpen}>
         <header>
-          <input
-            className="title"
-            placeholder="Untitled trip"
-            maxLength={120}
-            value={title}
-            onChange={(e) => setItin((it) => ({ ...it, title: e.target.value }))}
-          />
-          <PlaceSearch onPick={addPlace} getBias={() => mapView.current?.center() ?? null} />
-          <label className="row style-pick">
-            <span>Basemap</span>
-            <select
-              value={mapStyle.id}
-              onChange={(e) => {
-                const s = MAP_STYLES.find((m) => m.id === e.target.value)!
-                setMapStyle(s)
-                saveStyle(s.id)
-              }}
+          <div className="row">
+            <input
+              className="title"
+              placeholder="Untitled trip"
+              maxLength={120}
+              value={title}
+              onChange={(e) => setItin((it) => ({ ...it, title: e.target.value }))}
+            />
+            <button
+              className="panel-arrow"
+              title="Hide side panel"
+              aria-label="Hide side panel"
+              onClick={() => setPanelOpen(false)}
             >
-              {MAP_STYLES.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.label}
-                </option>
-              ))}
-            </select>
-          </label>
+              <span>‹</span>
+            </button>
+          </div>
+          <PlaceSearch onPick={addPlace} getBias={() => mapView.current?.center() ?? null} />
           <div className="row toggles">
             <label>
               <input
@@ -154,20 +170,79 @@ export default function App() {
             <button
               className="theme-btn"
               title={`Switch to ${theme === 'light' ? 'dark' : 'light'} theme`}
+              aria-label={`Switch to ${theme === 'light' ? 'dark' : 'light'} theme`}
               onClick={() => setTheme((t) => (t === 'light' ? 'dark' : 'light'))}
             >
-              {theme === 'light' ? '☾ Dark' : '☀ Light'}
+              {theme === 'light' ? '☾' : '☀'}
             </button>
           </div>
         </header>
 
         <ol className="stops">
-          {stops.length === 0 && <li className="empty">Click the map or search to add stops.</li>}
+          {stops.length === 0 && <li className="empty">Search, or right-click the map, to add stops.</li>}
           {stops.map((s, i) => (
             <li key={s.id}>
-              <button className="num" title="Show on map" onClick={() => mapView.current?.focus(i)}>
-                {i + 1}
+              <button
+                className={`num${s.icon ? ' has-icon' : ''}`}
+                title="Change icon"
+                aria-haspopup="true"
+                aria-expanded={picker === i}
+                onClick={() => setPicker(picker === i ? null : i)}
+              >
+                {s.icon || i + 1}
               </button>
+              {picker === i && (
+                <>
+                  <div className="picker-backdrop" onClick={() => setPicker(null)} />
+                  <div
+                    className={`icon-picker${i > 1 && i >= stops.length - 2 ? ' up' : ''}`}
+                    role="dialog" aria-label={`Icon for stop ${i + 1}`}>
+                    <button
+                      className={`icon-opt num-opt${s.icon ? '' : ' selected'}`}
+                      title="Show number"
+                      onClick={() => {
+                        updateStop(i, { icon: '' })
+                        setPicker(null)
+                      }}
+                    >
+                      {i + 1}
+                    </button>
+                    {ICONS.map((ic) => (
+                      <button
+                        key={ic}
+                        className={`icon-opt${s.icon === ic ? ' selected' : ''}`}
+                        onClick={() => {
+                          updateStop(i, { icon: ic })
+                          setPicker(null)
+                        }}
+                      >
+                        {ic}
+                      </button>
+                    ))}
+                    <input
+                      className="picker-any"
+                      placeholder="Or type / paste any emoji…"
+                      aria-label="Any emoji"
+                      onChange={(e) => {
+                        const emoji = firstEmoji(e.target.value)
+                        if (emoji) {
+                          updateStop(i, { icon: emoji })
+                          setPicker(null)
+                        }
+                      }}
+                    />
+                    <button
+                      className="picker-show"
+                      onClick={() => {
+                        setPicker(null)
+                        mapView.current?.focus(i)
+                      }}
+                    >
+                      Show on map
+                    </button>
+                  </div>
+                </>
+              )}
               <div className="fields">
                 <input
                   placeholder={`Stop ${i + 1}`}
@@ -201,7 +276,7 @@ export default function App() {
         <footer>
           <div className="row">
             <button className="primary grow" onClick={copyLink} disabled={!stops.length && !title}>
-              {copied ? 'Copied!' : 'Copy share link'}
+              {copied === 'link' ? 'Copied!' : 'Copy share link'}
             </button>
             <button title="Zoom to all stops" onClick={() => mapView.current?.fit()}>
               Fit
@@ -214,11 +289,11 @@ export default function App() {
             </button>
           </div>
           <div className="row">
-            <button className="grow" onClick={download} disabled={!stops.length}>
-              Download .geojson
+            <button className="grow" title="Download as a .geojson file" onClick={download} disabled={!stops.length}>
+              Download
             </button>
-            <button className="grow" onClick={() => fileInput.current?.click()}>
-              Import GeoJSON
+            <button className="grow" title="Import a .geojson file" onClick={() => fileInput.current?.click()}>
+              Import
             </button>
             <input
               ref={fileInput}
@@ -232,22 +307,48 @@ export default function App() {
               }}
             />
           </div>
+          <button
+            title="Copy instructions that teach an AI assistant this app's GeoJSON format and link scheme"
+            onClick={copyPrompt}
+          >
+            {copied === 'prompt' ? 'Copied!' : 'Copy prompt for agents'}
+          </button>
           {stops.length > 0 && (
             <div className="meta">
-              {stops.length} stop{stops.length === 1 ? '' : 's'} · click a pin for its description
+              {stops.length} stop{stops.length === 1 ? '' : 's'} · right-click the map to add a stop
             </div>
           )}
         </footer>
       </aside>
 
-      <MapView
-        ref={mapView}
-        stops={stops}
-        mapStyle={mapStyle}
-        showNumbers={showNumbers}
-        showPath={showPath}
-        onAdd={addStop}
-      />
+      <div className="map-wrap">
+        {!panelOpen && (
+          <button
+            className="panel-arrow panel-open map-btn"
+            title="Show side panel"
+            aria-label="Show side panel"
+            onClick={() => setPanelOpen(true)}
+          >
+            <span>›</span>
+          </button>
+        )}
+        <BasemapPicker
+          className={panelOpen ? '' : 'shifted'}
+          value={mapStyle}
+          onChange={(s) => {
+            setMapStyle(s)
+            saveStyle(s.id)
+          }}
+        />
+        <MapView
+          ref={mapView}
+          stops={stops}
+          mapStyle={mapStyle}
+          showNumbers={showNumbers}
+          showPath={showPath}
+          onAdd={addStop}
+        />
+      </div>
     </div>
   )
 }

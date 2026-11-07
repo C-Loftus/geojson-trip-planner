@@ -1,4 +1,5 @@
 import type { Feature, FeatureCollection, Geometry, LineString, Point } from 'geojson'
+import { emojiToId, idToEmoji } from './icons'
 
 export interface Stop {
   id: string
@@ -6,6 +7,8 @@ export interface Stop {
   lat: number
   name: string
   description: string
+  /** Emoji shown on the map instead of the stop number; '' = show the number. */
+  icon: string // the emoji itself; stored in GeoJSON as its code point ID
 }
 
 export interface Itinerary {
@@ -21,6 +24,8 @@ export const EMPTY: Itinerary = { title: '', stops: [], showNumbers: true, showP
 export interface StopProps {
   name: string
   description?: string
+  /** Unicode code point sequence of an emoji, e.g. "1F3E8" for 🏨. */
+  icon?: string
 }
 
 export interface ItineraryCollection extends FeatureCollection<Point, StopProps> {
@@ -45,6 +50,7 @@ export function toGeoJSON({ title, stops, showNumbers, showPath }: Itinerary): I
   fc.features = stops.map((s) => {
     const properties: StopProps = { name: s.name }
     if (s.description) properties.description = s.description
+    if (s.icon) properties.icon = emojiToId(s.icon)
     return {
       type: 'Feature',
       properties,
@@ -83,13 +89,21 @@ export function fromGeoJSON(input: unknown): Itinerary {
     const p = (f.properties ?? {}) as Record<string, unknown>
     const name = String(p.name ?? p.title ?? '')
     const description = String(p.description ?? p.note ?? '')
+    const icon = typeof p.icon === 'string' ? idToEmoji(p.icon) : ''
     const coords =
       g.type === 'Point' ? [g.coordinates] : g.type === 'MultiPoint' || g.type === 'LineString' ? g.coordinates : []
     coords.forEach((c, i) => {
       const lng = Number(c[0])
       const lat = Number(c[1])
       if (Number.isFinite(lng) && Number.isFinite(lat)) {
-        stops.push({ id: newId(), lng, lat, name: i ? '' : name, description: i ? '' : description })
+        stops.push({
+          id: newId(),
+          lng,
+          lat,
+          name: i ? '' : name,
+          description: i ? '' : description,
+          icon: i ? '' : icon,
+        })
       }
     })
   }
@@ -117,7 +131,14 @@ export function mapData(stops: Stop[]) {
     features: stops.map((s, i) => ({
       type: 'Feature',
       id: i,
-      properties: { idx: i, num: String(i + 1), name: s.name, description: s.description },
+      // `icon` is only present when set, so map filters can use ['has', 'icon'].
+      properties: {
+        idx: i,
+        num: String(i + 1),
+        name: s.name,
+        description: s.description,
+        ...(s.icon ? { icon: s.icon } : {}),
+      },
       geometry: { type: 'Point', coordinates: [s.lng, s.lat] },
     })),
   }
