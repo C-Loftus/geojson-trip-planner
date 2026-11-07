@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Itinerary Map</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  :root {
+    --bg: #ffffff; --panel: #f7f7f5; --text: #1d1d1b; --muted: #6b6b66;
+    --border: #e2e2dc; --accent: #2f6fde; --accent-text: #fff; --danger: #c43c3c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #161615; --panel: #1f1f1d; --text: #ecece8; --muted: #9a9a93;
+            --border: #34342f; --accent: #5b8ff0; --accent-text: #fff; --danger: #e06666; }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+               font: 14px/1.4 system-ui, -apple-system, Segoe UI, sans-serif; }
+  #app { display: flex; height: 100%; }
+  aside { width: 340px; flex: none; display: flex; flex-direction: column;
+          background: var(--panel); border-right: 1px solid var(--border); }
+  #map { flex: 1; }
+  header { padding: 12px 16px; border-bottom: 1px solid var(--border); display: grid; gap: 8px; }
+  input, textarea, button { font: inherit; color: inherit; }
+  input, textarea { width: 100%; background: var(--bg); border: 1px solid var(--border);
+                    border-radius: 6px; padding: 6px 8px; }
+  textarea { resize: vertical; min-height: 2.2em; }
+  #title { font-size: 17px; font-weight: 600; }
+  button { background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+           padding: 6px 10px; cursor: pointer; }
+  button:hover { border-color: var(--muted); }
+  button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  .row { display: flex; gap: 6px; }
+  .row > input { flex: 1; }
+  #stops { list-style: none; margin: 0; padding: 8px 16px; overflow-y: auto; flex: 1; }
+  #stops li { display: grid; grid-template-columns: 26px 1fr auto; gap: 6px 8px;
+              padding: 8px 0; border-bottom: 1px solid var(--border); }
+  .num { width: 24px; height: 24px; border-radius: 50%; background: var(--accent);
+         color: var(--accent-text); display: grid; place-items: center; font-size: 12px;
+         font-weight: 600; cursor: pointer; }
+  .fields { display: grid; gap: 4px; }
+  .fields textarea { font-size: 13px; color: var(--muted); }
+  .ctrls { display: flex; flex-direction: column; gap: 2px; }
+  .ctrls button { padding: 0 6px; line-height: 20px; font-size: 12px; }
+  .ctrls .del { color: var(--danger); }
+  .empty { color: var(--muted); padding: 16px 0; }
+  footer { padding: 10px 16px; border-top: 1px solid var(--border); display: grid; gap: 6px; }
+  #meta { color: var(--muted); font-size: 12px; }
+  .pin { width: 26px; height: 26px; border-radius: 50%; background: var(--accent); color: #fff;
+         border: 2px solid #fff; box-shadow: 0 1px 4px rgba(0,0,0,.4); display: grid;
+         place-items: center; font: 600 12px system-ui, sans-serif; }
+  @media (max-width: 700px) {
+    #app { flex-direction: column-reverse; }
+    aside { width: 100%; height: 45%; border-right: 0; border-top: 1px solid var(--border); }
+    #map { min-height: 55%; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <aside>
+    <header>
+      <input id="title" placeholder="Untitled trip" maxlength="120">
+      <form id="search" class="row">
+        <input id="q" placeholder="Search a place…" autocomplete="off">
+        <button>Add</button>
+      </form>
+    </header>
+    <ul id="stops"></ul>
+    <footer>
+      <div class="row">
+        <button id="copy" class="primary" style="flex:1">Copy share link</button>
+        <button id="fit" title="Zoom to all stops">Fit</button>
+        <button id="clear" title="Remove all stops">Clear</button>
+      </div>
+      <div class="row">
+        <button id="download" style="flex:1">Download .geojson</button>
+        <button id="import" style="flex:1">Import GeoJSON</button>
+        <input id="file" type="file" accept=".geojson,.json,application/geo+json,application/json" hidden>
+      </div>
+      <div id="meta"></div>
+    </footer>
+  </aside>
+  <div id="map"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+// ---------- Codec: plain GeoJSON in the URL fragment ----------
+// The hash is a percent-encoded GeoJSON FeatureCollection of Point features, in stop order.
+// The trip title is stored as a top-level "name" member (allowed by RFC 7946 as a foreign member).
+const r5 = n => Math.round(n * 1e5) / 1e5;   // ~1 m precision keeps links short
+
+function toGeoJSON({ title, stops }) {
+  const fc = { type: 'FeatureCollection' };
+  if (title) fc.name = title;
+  fc.features = stops.map(s => {
+    const properties = { name: s.name };
+    if (s.note) properties.note = s.note;
+    return { type: 'Feature', properties, geometry: { type: 'Point', coordinates: [r5(s.lng), r5(s.lat)] } };
+  });
+  return fc;
+}
+// Accept any GeoJSON: FeatureCollection, a single Feature, or a bare geometry.
+// Points become stops; MultiPoint/LineString vertices become stops too.
+function fromGeoJSON(gj) {
+  const feats = gj.type === 'FeatureCollection' ? gj.features
+    : gj.type === 'Feature' ? [gj] : [{ type: 'Feature', properties: {}, geometry: gj }];
+  const stops = [];
+  for (const f of feats || []) {
+    const g = f && f.geometry, p = (f && f.properties) || {};
+    if (!g) continue;
+    const name = String(p.name ?? p.title ?? ''), note = String(p.note ?? p.description ?? '');
+    const pts = g.type === 'Point' ? [g.coordinates]
+      : (g.type === 'MultiPoint' || g.type === 'LineString') ? g.coordinates : [];
+    pts.forEach((c, i) => stops.push({ lng: +c[0], lat: +c[1], name: i ? '' : name, note: i ? '' : note }));
+  }
+  return { title: String(gj.name ?? gj.properties?.name ?? ''), stops: stops.filter(s => isFinite(s.lat) && isFinite(s.lng)) };
+}
+const encodeState = st => encodeURIComponent(JSON.stringify(toGeoJSON(st)))
+  .replace(/%(2C|3A|5B|5D|7B|7D|40|24)/g, (_, h) => String.fromCharCode(parseInt(h, 16))); // keep , : [ ] { } readable
+const decodeState = hash => fromGeoJSON(JSON.parse(decodeURIComponent(hash)));
+
+// ---------- State & UI ----------
+let state = { title: '', stops: [] };
+const $ = id => document.getElementById(id);
+const map = L.map('map', { zoomControl: true }).setView([39.5, -98.35], 4);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19, attribution: '&copy; OpenStreetMap contributors'
+}).addTo(map);
+const layer = L.layerGroup().addTo(map);
+
+function renderMap() {
+  layer.clearLayers();
+  const ll = state.stops.map(s => [s.lat, s.lng]);
+  if (ll.length > 1) L.polyline(ll, { color: getComputedStyle(document.documentElement)
+    .getPropertyValue('--accent').trim() || '#2f6fde', weight: 3, dashArray: '6 6' }).addTo(layer);
+  state.stops.forEach((s, i) => {
+    const m = L.marker([s.lat, s.lng], {
+      draggable: true,
+      icon: L.divIcon({ className: '', html: `<div class="pin">${i + 1}</div>`, iconSize: [26, 26], iconAnchor: [13, 13] })
+    }).addTo(layer);
+    if (s.name || s.note) m.bindTooltip(escapeHtml(s.name || `Stop ${i + 1}`) +
+      (s.note ? `<br><small>${escapeHtml(s.note)}</small>` : ''));
+    m.on('dragend', e => { const p = e.target.getLatLng(); s.lat = p.lat; s.lng = p.lng; changed(true); });
+  });
+}
+
+function renderList() {
+  const ul = $('stops'); ul.innerHTML = '';
+  if (!state.stops.length) {
+    ul.innerHTML = '<li class="empty" style="display:block">Click the map or search to add stops.</li>';
+    return;
+  }
+  state.stops.forEach((s, i) => {
+    const li = document.createElement('li');
+    li.innerHTML = `<div class="num" title="Zoom here">${i + 1}</div>
+      <div class="fields"><input class="name" placeholder="Stop ${i + 1}" maxlength="80">
+      <textarea class="note" rows="1" placeholder="Notes" maxlength="300"></textarea></div>
+      <div class="ctrls"><button class="up" title="Move up">▲</button>
+      <button class="down" title="Move down">▼</button><button class="del" title="Remove">✕</button></div>`;
+    const name = li.querySelector('.name'), note = li.querySelector('.note');
+    name.value = s.name; note.value = s.note;
+    name.oninput = () => { s.name = name.value; changed(true, false); };
+    note.oninput = () => { s.note = note.value; changed(true, false); };
+    li.querySelector('.num').onclick = () => map.setView([s.lat, s.lng], Math.max(map.getZoom(), 12));
+    li.querySelector('.up').onclick = () => move(i, -1);
+    li.querySelector('.down').onclick = () => move(i, 1);
+    li.querySelector('.del').onclick = () => { state.stops.splice(i, 1); changed(); };
+    ul.appendChild(li);
+  });
+}
+
+function move(i, d) {
+  const j = i + d; if (j < 0 || j >= state.stops.length) return;
+  [state.stops[i], state.stops[j]] = [state.stops[j], state.stops[i]]; changed();
+}
+
+let saveTimer;
+function changed(mapOnly = false, rerenderList = true) {
+  renderMap();
+  if (!mapOnly && rerenderList) renderList();
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(save, 250);
+}
+function save() {
+  const empty = !state.title && !state.stops.length;
+  const h = empty ? '' : encodeState(state);
+  history.replaceState(null, '', h ? '#' + h : location.pathname + location.search);
+  $('meta').textContent = empty ? '' :
+    `${state.stops.length} stop${state.stops.length === 1 ? '' : 's'} · link ${location.href.length} chars`;
+  document.title = state.title ? `${state.title} · Itinerary Map` : 'Itinerary Map';
+}
+function fit() {
+  if (!state.stops.length) return;
+  if (state.stops.length === 1) map.setView([state.stops[0].lat, state.stops[0].lng], 12);
+  else map.fitBounds(state.stops.map(s => [s.lat, s.lng]), { padding: [40, 40] });
+}
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+function addStop(lat, lng, name = '') {
+  state.stops.push({ lat, lng, name, note: '' }); changed();
+}
+
+map.on('click', e => addStop(e.latlng.lat, e.latlng.lng));
+$('title').oninput = e => { state.title = e.target.value; changed(true); };
+$('fit').onclick = fit;
+$('clear').onclick = () => { if (state.stops.length && confirm('Remove all stops?')) { state.stops = []; changed(); } };
+$('copy').onclick = async () => {
+  save();
+  try { await navigator.clipboard.writeText(location.href); flash('Copied!'); }
+  catch { prompt('Copy this link:', location.href); }
+};
+$('download').onclick = () => {
+  const blob = new Blob([JSON.stringify(toGeoJSON(state), null, 2)], { type: 'application/geo+json' });
+  const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob),
+    download: (state.title || 'itinerary').replace(/[^\w -]+/g, '').trim().replace(/\s+/g, '-') + '.geojson' });
+  a.click(); URL.revokeObjectURL(a.href);
+};
+$('import').onclick = () => $('file').click();
+$('file').onchange = async e => {
+  const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+  try {
+    const next = fromGeoJSON(JSON.parse(await f.text()));
+    if (!next.stops.length) return alert('No points found in that file.');
+    state = next; $('title').value = state.title; changed(); fit();
+  } catch { alert('Could not read that file as GeoJSON.'); }
+};
+function flash(msg) {
+  const b = $('copy'), t = b.textContent; b.textContent = msg; setTimeout(() => b.textContent = t, 1200);
+}
+
+// Place search via OpenStreetMap Nominatim (only on submit, per usage policy)
+$('search').onsubmit = async e => {
+  e.preventDefault();
+  const q = $('q').value.trim(); if (!q) return;
+  try {
+    const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(q));
+    const [hit] = await r.json();
+    if (!hit) return alert('No match found.');
+    addStop(+hit.lat, +hit.lon, hit.display_name.split(',')[0]);
+    map.setView([+hit.lat, +hit.lon], Math.max(map.getZoom(), 10));
+    $('q').value = '';
+  } catch { alert('Search failed.'); }
+};
+
+async function load() {
+  const h = location.hash.slice(1);
+  if (h) {
+    try { state = decodeState(h); }
+    catch (err) { console.error(err); alert('This link appears to be corrupted.'); }
+  }
+  $('title').value = state.title;
+  renderMap(); renderList(); fit(); save();
+}
+window.addEventListener('hashchange', load);
+load();
+</script>
+</body>
+</html>
