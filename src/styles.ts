@@ -23,7 +23,7 @@ export function initialStyle(): MapStyle {
   } catch {
     /* storage unavailable */
   }
-  return MAP_STYLES[0] // Liberty (light)
+  return MAP_STYLES.find((s) => s.id === 'bright')!
 }
 
 export function saveStyle(id: string) {
